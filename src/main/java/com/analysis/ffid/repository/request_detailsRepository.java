@@ -13,6 +13,7 @@ public interface request_detailsRepository extends JpaRepository<request_details
     @Query("SELECT r FROM request_details r " +
             "LEFT JOIN FETCH r.sm20Entries " +
             "LEFT JOIN FETCH r.cdhdrEntries " +
+            "LEFT JOIN FETCH r.transactionUsages " +
             "WHERE r.analysisID = :analysisID")
     Optional<request_details> findByIdWithRelations(String analysisID);
 }

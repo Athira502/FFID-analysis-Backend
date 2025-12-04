@@ -46,7 +46,7 @@ public class analysis_result {
     @Column(name = "red_flags")
     private String red_flags;
 
-    @Column(name = "keyInsight")
+    @Column(columnDefinition = "TEXT")
     private String keyInsight;
 
 

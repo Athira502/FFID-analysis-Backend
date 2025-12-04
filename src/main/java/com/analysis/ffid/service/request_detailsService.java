@@ -8,6 +8,7 @@ import com.analysis.ffid.repository.client_systemRepository;
 import com.analysis.ffid.repository.request_detailsRepository;
 import com.analysis.ffid.repository.sm20Repository;
 import com.analysis.ffid.repository.transaction_usageRepository;
+import jakarta.persistence.Column;
 import lombok.RequiredArgsConstructor;
 import org.apache.poi.ss.usermodel.*;
 import org.springframework.stereotype.Service;
@@ -112,6 +113,10 @@ public class request_detailsService {
             }
         }
     }
+
+
+
+
 
     private String getCellValue(Row row, int colIndex) {
         Cell cell = row.getCell(colIndex);

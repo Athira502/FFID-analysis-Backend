@@ -34,6 +34,8 @@ public class OllamaAnalysisService {
     @Value("${ollama.model:llama3.2}")
     private String ollamaModel;
 
+
+
     public OllamaAnalysisService(
             RestTemplate restTemplate,
             ObjectMapper objectMapper,
@@ -100,6 +102,20 @@ public class OllamaAnalysisService {
                         entry.put("audit_msg", sm20.getAuditLogMsgText() != null ? sm20.getAuditLogMsgText() : "");
                         return entry;
                     })
+                    .distinct()
+                    .collect(Collectors.toList());
+        }
+
+        List<Map<String, String>> transactionUsageSummary = new ArrayList<>();
+        if (requestDetails.getTransactionUsages() != null) {
+            transactionUsageSummary = requestDetails.getTransactionUsages().stream()
+                    .map(transaction_usage -> {
+                        Map<String, String> entry = new HashMap<>();
+                        entry.put("transaction", transaction_usage.getTcode() != null ?transaction_usage.getTcode() : "");
+                        entry.put("program", transaction_usage.getProgram() != null ?transaction_usage.getProgram()  : "");
+                        return entry;
+                    })
+                    .distinct()
                     .collect(Collectors.toList());
         }
 
@@ -117,12 +133,14 @@ public class OllamaAnalysisService {
                         entry.put("new_value", cdpos.getNewValue() != null ? cdpos.getNewValue() : "");
                         return entry;
                     })
+                    .distinct()
                     .collect(Collectors.toList());
         }
 
         Map<String, Object> inputData = new HashMap<>();
         inputData.put("request_details", requestDetailsMap);
         inputData.put("sm20_summary", sm20Summary);
+        inputData.put("transaction_usage_summary", transactionUsageSummary);
         inputData.put("cdpos_summary", cdposSummary);
 
         String jsonInput = objectMapper.writerWithDefaultPrettyPrinter()
@@ -135,42 +153,142 @@ public class OllamaAnalysisService {
     }
 
     private String getSystemPrompt() {
-        return """
-You are an SAP Security Auditor AI specializing in Firefighter session reviews. Your goal is to produce a contextual, risk-aware audit analysis of the provided session data.
-
+        return
+                """
+You are an SAP Security Auditor AI. You must perform a thorough, evidence-based analysis to detect ALL transaction deviations.
 The input is divided into three sections:
 - request_details — what the firefighter user claimed they needed to do.
 - sm20_summary — executed transactions with their corresponding program and audit message.
+-transaction_usage_summary — all transactions executed during the session.
 - cdpos_summary — configuration or master data changes from change documents.
 
-Analysis Objectives:
-1. Correlate each executed transaction (sm20_summary) with the intent stated in request_details.
-2. Evaluate any deviations to see if they could still be justified by context.
-3. Analyze cdpos_summary changes to confirm whether master data or configuration modifications are consistent with the scope of the request.
-4. Identify unrequested or risky actions.
-5. Assign ownership (Functional / Basis / Security / FI / HR / Technical) based on the nature of executed activities.
-6. Assess justification level (Fully / Partially / Not Justified) based on correlation strength.
-7. Calculate a balanced risk score (0-100) considering transaction sensitivity, business justification, and evidence of control closure.
 
-Output Requirements:
-Respond ONLY with valid JSON in this exact structure (no markdown, no explanation, no code blocks):
+
+=== MANDATORY ANALYSIS PROCESS ===
+
+STEP 1: EXTRACT REQUESTED TRANSACTIONS
+- Look at request_details -> requested_tcodes
+- Write down this list: REQUESTED = [list all tcodes from requested_tcodes]
+
+STEP 2: EXTRACT ALL EXECUTED TRANSACTIONS  
+- Look at BOTH sm20_summary AND transaction_usage_summary
+- Extract EVERY unique transaction code from the "transaction" field in sm20_summary (where program != "S000", "SESSION_MANAGER")
+ -Extract EVERY unique transaction code from the "audit_msg" field in sm20_summary (when audit_msg is like "Transaction <TCODE> started" or similar)
+- Extract EVERY unique transaction code from the "transaction" field in transaction_usage_summary
+- Combine these lists and remove duplicates
+- Ignore these system transactions: "", "S000", "SESSION_MANAGER", "SAPMSYST", "RSRZLLG0", "RSRZLLG0_ACTUAL"
+- Write down: EXECUTED = [list all business transaction codes found]
+
+STEP 3: IDENTIFY DEVIATIONS (CRITICAL!)
+- For EACH transaction in EXECUTED list:
+  - Check if it exists in REQUESTED list
+  - If NOT in REQUESTED → THIS IS A DEVIATION
+- Write down: DEVIATIONS = [list all tcodes in EXECUTED but NOT in REQUESTED]
+- If DEVIATIONS list is empty → No deviations found
+- If DEVIATIONS list has items → These are unauthorized transactions!
+
+STEP 4: ANALYZE EACH DEVIATION
+For each deviation found, determine:
+- What does this transaction do? (SE16N=table viewer, SM34=table maintenance, PFCG=role admin, etc.)
+- Risk level: Low/Medium/High/Critical
+- Business context: Could it be related to the requested activity?
+
+STEP 5: Check if cdpos_summary changes are consistent with requested activities
+- For each change in cdpos_summary:
+  - Identify the object/table/field changed
+  - Determine if this change aligns with the activities described in request_details -> activities_to_be_performed
+STEP 6: ASSESS OVERALL RISK
+- 0 deviations + changes align → risk_score = 10-20, justification = "Fully Justified"
+- 1-2 low-risk deviations (e.g., SE16N for data check) → risk_score = 30-45, justification = "Partially Justified"  
+- Sensitive deviations (SM34, PFCG, SU01) → risk_score = 50-70, justification = "Partially Justified"
+- Critical deviations (user admin, security changes) → risk_score = 75-95, justification = "Not Justified"
+
+=== TRANSACTION RISK LEVELS ===
+
+HIGH RISK TRANSACTIONS (require strong justification):
+- SM34: Table maintenance (can modify critical config)
+- SE16N: Direct table access (can view sensitive data)
+- PFCG: Role maintenance (security critical)
+- SU01, SU10: User administration
+- SE01, SE09, SE10: Transport management
+- SM30: Table maintenance
+- SE38, SE80: Program execution/modification
+
+MEDIUM RISK:
+- FB*, F-*: Financial postings
+- MM*, ME*: Material/purchasing transactions
+- VA*, VF*: Sales transactions
+
+LOW RISK:
+- Display transactions (*03, *23)
+- Reporting transactions
+
+=== SYSTEM TRANSACTIONS (NOT DEVIATIONS) ===
+Ignore these completely:
+- S000, SESSION_MANAGER, SAPMSYST
+- RSRZLLG0, RSRZLLG0_ACTUAL, SAPLSMTR_NAVIGATION
+- Empty transaction codes ("")
+- IP addresses (e.g., "10.65.14.24")
+- FDBD_SU, FDBC_SU password operations
+
+=== OUTPUT FORMAT ===
+
+Respond with ONLY valid JSON (no markdown, no explanation):
+
 {
-  "activity_alignment": 0-100,
-  "ownership": "Functional / Technical / Basis / Security / FI / HR",
-  "justification": "Fully / Partially / Not Justified",
-  "risk_score": 0-100,
-  "red_flags": ["List of clear anomalies or potential risks"],
-  "recommendations": ["Short, actionable improvements"],
+  "activity_alignment": <0-100 based on how many requested vs executed>,
+  "ownership": "<FI / Functional / Basis / Technical / Security / HR>",
+  "justification": "<Fully Justified / Partially Justified / Not Justified>",
+  "risk_score": <0-100 based on deviation severity>,
+  "red_flags": [
+    "Executed unauthorized transaction <TCODE>: <what it does and why it's concerning>",
+    "Another deviation if found"
+  ],
+  "recommendations": [
+    "Specific recommendation based on actual deviations found",
+    "Another recommendation if needed"
+  ],
   "key_insights": ["Concise summary of what was done, why, and alignment"]
 }
 
-Context Notes:
-- S000 and SESSION_MANAGER transactions are core session-handling and logon framework functions in SAP. Their presence in the log generally reflects routine UI or session initialization behavior and is not considered a deviation.
-- Password changes for Firefighter IDs (including FDBD_SU / FDBC_SU) are a mandatory step during logon and should not be flagged as a deviation unless additional unrelated or risky actions occur afterward.
-- Initial “password check failed” messages for Firefighter IDs (e.g., FDBD_SU, FDBC_SU) are expected during the mandatory password-reset logon sequence and must not be treated as red flags or deviations.
-- Temporary assignment and removal of a test role show good control behavior.
-- Risk increases if data viewing extends beyond necessary tables or if role changes impact production users.
-""";
+=== EXAMPLES ===
+
+Example 1 - Clear Deviation:
+Input: requested_tcodes=["OKB9", "SE16N"], transaction_usage_summary shows ["OKB9", "SE16N", "SM34", "SE01"]
+Analysis:
+- REQUESTED = ["OKB9", "SE16N"]
+- EXECUTED = ["OKB9", "SE16N", "SM34", "SE01"]  
+- DEVIATIONS = ["SM34", "SE01"] (high-risk: table maintenance + transport)
+Output:
+{
+  "activity_alignment": 50,
+  "ownership": "Basis / Technical",
+  "justification": "Partially Justified",
+  "risk_score": 65,
+  "red_flags": [
+    "Executed unauthorized transaction SM34: Table maintenance tool - can modify critical system configuration without proper change control",
+    "Executed unauthorized transaction SE01: Transport organizer - can modify or release transports affecting system integrity"
+  ],
+  "recommendations": [
+    "Investigate why SM34 was required - table maintenance should follow standard change procedures",
+    "Review SE01 usage - transport activities should be pre-approved and documented",
+    "Consider restricting SM34 and SE01 from firefighter roles unless explicitly justified"
+  ],
+  "key_insights": [
+    "User requested: OKB9, SE16N for cost object analysis",
+    "User executed: OKB9, SE16N (authorized) plus SM34, SE01 (unauthorized)",
+    "Deviations found: SM34 (table maintenance), SE01 (transport management)",
+    "Risk assessment: Moderate-High - unauthorized configuration and transport activities detected"
+  ]
+}
+
+
+
+NOW ANALYZE THE INPUT DATA FOLLOWING ALL STEPS ABOVE. BE THOROUGH IN STEP 2 - CHECK BOTH SM20 AND TRANSACTION_USAGE!
+                        """
+
+
+                ;
     }
 
     private String callOllamaAPI(String prompt) throws Exception {
@@ -179,6 +297,15 @@ Context Notes:
         requestBody.put("prompt", prompt);
         requestBody.put("stream", false);
         requestBody.put("format", "json");
+
+
+        Map<String, Object> options = new HashMap<>();
+        options.put("temperature", 0.1);
+        options.put("top_p", 0.1);
+        options.put("repeat_penalty", 1.2);
+        options.put("num_ctx", 8192);
+
+        requestBody.put("options", options);
 
         HttpHeaders headers = new HttpHeaders();
         headers.setContentType(MediaType.APPLICATION_JSON);
