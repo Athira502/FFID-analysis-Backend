@@ -12,8 +12,9 @@ import java.util.List;
 
 @Repository
 public interface cdhdr_cdposRepository extends JpaRepository<cdhdr_cdpos, Long> {
-
     List<cdhdr_cdpos> findByRequestDetails(request_details requestDetails);
+
+
 
     List<cdhdr_cdpos> findByDocNumberAndRequestDetails(String doc_number, request_details requestDetails);
 

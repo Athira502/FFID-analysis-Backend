@@ -9,3 +9,4 @@ import java.util.Optional;
 public interface client_systemRepository extends JpaRepository<client_system, String> {
     Optional<client_system> findByClientAndSystem(String client, String system);
 }
+

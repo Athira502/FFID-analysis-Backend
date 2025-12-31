@@ -14,6 +14,8 @@ public class AnalysisResponseDTO {
     private List<String> recommendations;
     private List<String> keyInsights;
 
+
+
     public AnalysisResponseDTO() {}
 
 

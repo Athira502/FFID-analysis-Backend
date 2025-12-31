@@ -1,24 +1,27 @@
+
 package com.analysis.ffid.service;
 
-import com.analysis.ffid.model.client_system;
-import com.analysis.ffid.model.request_details;
-import com.analysis.ffid.model.sm20;
-import com.analysis.ffid.model.transaction_usage;
-import com.analysis.ffid.repository.client_systemRepository;
-import com.analysis.ffid.repository.request_detailsRepository;
-import com.analysis.ffid.repository.sm20Repository;
-import com.analysis.ffid.repository.transaction_usageRepository;
+import com.analysis.ffid.model.*;
+import com.analysis.ffid.repository.*;
 import jakarta.persistence.Column;
 import lombok.RequiredArgsConstructor;
+import lombok.extern.slf4j.Slf4j;
 import org.apache.poi.ss.usermodel.*;
 import org.springframework.stereotype.Service;
+import org.springframework.transaction.annotation.Transactional;
 import org.springframework.web.multipart.MultipartFile;
-
+import com.analysis.ffid.dto.*;
+import com.analysis.ffid.model.*;
+import com.analysis.ffid.repository.*;
 import java.io.InputStream;
 import java.util.Iterator;
+import java.util.List;
+import java.util.*;
 import java.util.Optional;
 import java.util.UUID;
+import java.util.stream.Collectors;
 
+@Slf4j
 @Service
 @RequiredArgsConstructor
 public class request_detailsService {
@@ -28,8 +31,15 @@ public class request_detailsService {
     private final sm20Repository sm20Repo;
     private final client_systemRepository clientSystemRepo;
 
+    private final cdhdr_cdposRepository cdhdrCdposRepo;
+    private final analysis_resultRepository analysisResultRepo;
 
+    @Transactional  // ADD THIS
     public request_details createRequest(request_details request) {
+        log.info("===== Creating Request =====");
+        log.info("ITSM Number: {}", request.getItsmNumber());
+        log.info("Client: {}, System: {}", request.getClient(), request.getSystem());
+
         Optional<client_system> existingCS = clientSystemRepo.findByClientAndSystem(
                 request.getClient(),
                 request.getSystem()
@@ -38,29 +48,246 @@ public class request_detailsService {
         client_system csEntity;
         if (existingCS.isPresent()) {
             csEntity = existingCS.get();
+            log.info("Found existing client_system with ID: {}", csEntity.getCS_ID());
         } else {
-
             csEntity = new client_system();
             csEntity.setCS_ID("CS-" + UUID.randomUUID().toString().substring(0, 8).toUpperCase());
             csEntity.setClient(request.getClient());
             csEntity.setSystem(request.getSystem());
-            clientSystemRepo.save(csEntity);
+            csEntity = clientSystemRepo.saveAndFlush(csEntity);
+            log.info("Created new client_system with ID: {}", csEntity.getCS_ID());
         }
 
         request.setClientSystem(csEntity);
-        return requestRepo.save(request);
+        request_details saved = requestRepo.save(request);
+        log.info("Request saved successfully with analysisID: {}", saved.getAnalysisID());
+
+        return saved;
     }
+
     public Optional<request_details> getRequestById(String analysisId) {
+        log.info("Fetching request by ID: {}", analysisId);
         return requestRepo.findById(analysisId);
     }
 
+    public List<RequestListDTO> getAllRequests() {
+        log.info("Fetching all requests");
+        List<request_details> requests = requestRepo.findAll();
+
+        return requests.stream()
+                .map(req -> RequestListDTO.builder()
+                        .analysisId(req.getAnalysisID())
+                        .itsmNumber(req.getItsmNumber())
+                        .client(req.getClient())
+                        .system(req.getSystem())
+                        .requestedFor(req.getRequestedFor())
+                        .requestedDate(req.getRequestedDate())
+                        .usedDate(req.getUsedDate())
+                        .build())
+                .collect(Collectors.toList());
+    }
+
+    /**
+     * Get complete request details with all tabs data
+     */
+    @Transactional(readOnly = true)
+    public RequestDetailsDTO getRequestDetails(String analysisId) {
+        log.info("Fetching complete details for: {}", analysisId);
+
+        request_details request = requestRepo.findById(analysisId)
+                .orElseThrow(() -> new RuntimeException("Request not found: " + analysisId));
+
+        // Fetch transaction usage logs
+        List<TransactionUsageDTO> transactionUsage = transactionRepo
+                .findByRequestDetails(request)
+                .stream()
+                .map(tu -> TransactionUsageDTO.builder()
+                        .timestamp(tu.getTime())
+                        .transaction(tu.getTcode())
+                        .description(tu.getProgram())
+                        .user(request.getRequestedFor())
+                        .client(request.getClient())
+                        .system(request.getSystem())
+                        .build())
+                .collect(Collectors.toList());
+
+        // Fetch SM20 audit logs
+        List<SM20DTO> auditLogs = sm20Repo
+                .findByRequestDetails(request)
+                .stream()
+                .map(sm -> SM20DTO.builder()
+                        .timestamp(sm.getEvent()  )
+                        .action(sm.getEntrydate())
+                        .terminal(sm.getPeer())
+                        .object(sm.getProgram())
+                        .program(sm.getAuditLogMsgText())
+                        .details(sm.getNote())
+                        .build())
+                .collect(Collectors.toList());
+
+
+
+        // Fetch CDHDR-CDPOS change logs
+        List<CdhdrCdposDTO> changeDocLogs = cdhdrCdposRepo
+                .findByRequestDetails(request)
+                .stream()
+                .map(cd -> CdhdrCdposDTO.builder()
+                        .timestamp(cd.getEntryDate() + " " + cd.getEntryTime())
+                        .table(cd.getTableName())
+                        .field(cd.getFieldName())
+                        .oldValue(cd.getOldValue())
+                        .newValue(cd.getNewValue())
+                        .user(cd.getUsername())
+                        .build())
+                .collect(Collectors.toList());
+
+        AnalysisInsightsDTO aiInsights = getAnalysisInsights(request);
+
+        return RequestDetailsDTO.builder()
+                .analysisId(request.getAnalysisID())
+                .itsmNumber(request.getItsmNumber())
+                .client(request.getClient())
+                .system(request.getSystem())
+                .requestedFor(request.getRequestedFor())
+                .requestedOnBehalfOf(request.getRequested_on_behalfof())
+                .requestedDate(request.getRequestedDate())
+                .usedDate(request.getUsedDate())
+                .tcodes(request.getTcodes())
+                .reason(request.getReason())
+                .activities(request.getActivities_to_be_performed())
+                .transactionUsage(transactionUsage)
+                .auditLogs(auditLogs)
+                .changeDocLogs(changeDocLogs)
+                .aiInsights(aiInsights)
+                .build();
+    }
+
+    /**
+     * Get AI Analysis Insights from analysis_result table
+     */
+    private AnalysisInsightsDTO getAnalysisInsights(request_details request) {
+        List<analysis_result> results = analysisResultRepo.findByRequestDetails(request);
+
+        if (results.isEmpty()) {
+            log.info("No analysis results found for request: {}", request.getAnalysisID());
+            return AnalysisInsightsDTO.builder()
+                    .activityAlignment(0)
+                    .ownership("Unknown")
+                    .justification("Pending")
+                    .riskScore(0)
+                    .redFlags(List.of("Analysis pending"))
+                    .recommendations(List.of("Analysis not yet completed"))
+                    .keyInsights(List.of("No insights available yet"))
+                    .build();
+        }
+
+        // Get the latest analysis result
+        analysis_result latestResult = results.get(0);
+
+        return AnalysisInsightsDTO.builder()
+                .activityAlignment(parseActivityAlignment(latestResult.getActivityAlignment()))
+                .ownership(latestResult.getOwnership() != null ? latestResult.getOwnership() : "Unknown")
+                .justification(latestResult.getJustification() != null ? latestResult.getJustification() : "Pending")
+                .riskScore(parseRiskScore(latestResult.getRisk_score()))
+                .redFlags(parseCommaSeparatedList(latestResult.getRed_flags()))
+                .recommendations(parseCommaSeparatedList(latestResult.getRecommendations()))
+                .keyInsights(parseKeyInsights(latestResult.getKeyInsight()))
+                .build();
+    }
+
+    /**
+     * Parse activity alignment percentage from string
+     */
+    private Integer parseActivityAlignment(String activityAlignment) {
+        if (activityAlignment == null || activityAlignment.trim().isEmpty()) {
+            return 0;
+        }
+        try {
+            // Remove any non-numeric characters except digits
+            String numStr = activityAlignment.replaceAll("[^0-9]", "");
+            if (!numStr.isEmpty()) {
+                int value = Integer.parseInt(numStr);
+                return Math.min(100, Math.max(0, value)); // Ensure 0-100 range
+            }
+        } catch (Exception e) {
+            log.warn("Could not parse activity alignment: {}", activityAlignment, e);
+        }
+        return 0;
+    }
+
+    /**
+     * Parse risk score from string
+     */
+    private Integer parseRiskScore(String riskScore) {
+        if (riskScore == null || riskScore.trim().isEmpty()) {
+            return 0;
+        }
+        try {
+            // Remove any non-numeric characters
+            String numStr = riskScore.replaceAll("[^0-9]", "");
+            if (!numStr.isEmpty()) {
+                int value = Integer.parseInt(numStr);
+                return Math.min(100, Math.max(0, value)); // Ensure 0-100 range
+            }
+        } catch (Exception e) {
+            log.warn("Could not parse risk score: {}", riskScore, e);
+        }
+        return 0;
+    }
+
+    /**
+     * Parse comma-separated string into list
+     */
+    private List<String> parseCommaSeparatedList(String input) {
+        if (input == null || input.trim().isEmpty()) {
+            return List.of();
+        }
+
+        return Arrays.stream(input.split(","))
+                .map(String::trim)
+                .filter(s -> !s.isEmpty())
+                .collect(Collectors.toList());
+    }
+
+    /**
+     * Parse key insights - could be comma-separated or newline-separated
+     */
+    private List<String> parseKeyInsights(String keyInsight) {
+        if (keyInsight == null || keyInsight.trim().isEmpty()) {
+            return List.of();
+        }
+
+        // Try splitting by newlines first, then commas
+        if (keyInsight.contains("\n")) {
+            return Arrays.stream(keyInsight.split("\n"))
+                    .map(String::trim)
+                    .filter(s -> !s.isEmpty())
+                    .collect(Collectors.toList());
+        } else {
+            return parseCommaSeparatedList(keyInsight);
+        }
+    }
+
+    @Transactional  // ADD THIS
     public void uploadTransactionLog(MultipartFile file, request_details request) throws Exception {
+        log.info("===== Uploading Transaction Log =====");
+        log.info("Request ID: {}", request.getAnalysisID());
+        log.info("File name: {}", file.getOriginalFilename());
+        log.info("File size: {} bytes", file.getSize());
+
+        int recordCount = 0;
+
         try (InputStream is = file.getInputStream();
              Workbook workbook = WorkbookFactory.create(is)) {
 
             Sheet sheet = workbook.getSheetAt(0);
             Iterator<Row> rowIterator = sheet.iterator();
-            if (rowIterator.hasNext()) rowIterator.next();
+
+            // Skip header row
+            if (rowIterator.hasNext()) {
+                Row headerRow = rowIterator.next();
+                log.info("Skipping header row");
+            }
 
             while (rowIterator.hasNext()) {
                 Row row = rowIterator.next();
@@ -73,22 +300,41 @@ public class request_detailsService {
                         .build();
 
                 transactionRepo.save(log);
+                recordCount++;
             }
+
+            log.info("Transaction log upload completed: {} records saved", recordCount);
+        } catch (Exception e) {
+            log.error("Error uploading transaction log", e);
+            throw new RuntimeException("Failed to upload transaction log: " + e.getMessage(), e);
         }
     }
 
+    @Transactional  // ADD THIS
     public void uploadSM20Log(MultipartFile file, request_details request) throws Exception {
+        log.info("===== Uploading SM20 Log =====");
+        log.info("Request ID: {}", request.getAnalysisID());
+        log.info("File name: {}", file.getOriginalFilename());
+        log.info("File size: {} bytes", file.getSize());
+
+        int recordCount = 0;
+
         try (InputStream is = file.getInputStream();
              Workbook workbook = WorkbookFactory.create(is)) {
 
             Sheet sheet = workbook.getSheetAt(0);
             Iterator<Row> rowIterator = sheet.iterator();
-            if (rowIterator.hasNext()) rowIterator.next();
+
+            // Skip header row
+            if (rowIterator.hasNext()) {
+                Row headerRow = rowIterator.next();
+                log.info("Skipping header row");
+            }
 
             while (rowIterator.hasNext()) {
                 Row row = rowIterator.next();
 
-                sm20 log = sm20.builder()
+                sm20 logEntry = sm20.builder()
                         .requestDetails(request)
                         .sapSystem(getCellValue(row, 0))
                         .asInstance(getCellValue(row, 1))
@@ -109,14 +355,16 @@ public class request_detailsService {
                         .variableData(getCellValue(row, 16))
                         .build();
 
-                sm20Repo.save(log);
+                sm20Repo.save(logEntry);
+                recordCount++;
             }
+
+            log.info("SM20 log upload completed: {} records saved", recordCount);
+        } catch (Exception e) {
+            log.error("Error uploading SM20 log", e);
+            throw new RuntimeException("Failed to upload SM20 log: " + e.getMessage(), e);
         }
     }
-
-
-
-
 
     private String getCellValue(Row row, int colIndex) {
         Cell cell = row.getCell(colIndex);
