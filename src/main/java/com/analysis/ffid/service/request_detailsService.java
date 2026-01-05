@@ -35,7 +35,7 @@ public class request_detailsService {
     private final cdhdr_cdposRepository cdhdrCdposRepo;
     private final analysis_resultRepository analysisResultRepo;
 
-    @Transactional  // ADD THIS
+    @Transactional
     public request_details createRequest(request_details request) {
         log.info("===== Creating Request =====");
         log.info("ITSM Number: {}", request.getItsmNumber());
