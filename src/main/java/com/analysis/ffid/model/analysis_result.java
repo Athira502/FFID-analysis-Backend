@@ -40,13 +40,13 @@ public class analysis_result {
     @Column(name = "risk_score")
     private String risk_score;
 
-    @Column(name = "recommendations")
+    @Column(name = "recommendations", columnDefinition = "TEXT")
     private String recommendations;
 
-    @Column(name = "red_flags")
+    @Column(name = "red_flags", columnDefinition = "TEXT")
     private String red_flags;
 
-    @Column(columnDefinition = "TEXT")
+    @Column(name = "keyInsight", columnDefinition = "TEXT")
     private String keyInsight;
 
 

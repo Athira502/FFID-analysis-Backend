@@ -14,6 +14,7 @@ import com.analysis.ffid.dto.*;
 import com.analysis.ffid.model.*;
 import com.analysis.ffid.repository.*;
 import java.io.InputStream;
+import java.text.SimpleDateFormat;
 import java.util.Iterator;
 import java.util.List;
 import java.util.*;
@@ -87,9 +88,7 @@ public class request_detailsService {
                 .collect(Collectors.toList());
     }
 
-    /**
-     * Get complete request details with all tabs data
-     */
+
     @Transactional(readOnly = true)
     public RequestDetailsDTO getRequestDetails(String analysisId) {
         log.info("Fetching complete details for: {}", analysisId);
@@ -97,7 +96,7 @@ public class request_detailsService {
         request_details request = requestRepo.findById(analysisId)
                 .orElseThrow(() -> new RuntimeException("Request not found: " + analysisId));
 
-        // Fetch transaction usage logs
+
         List<TransactionUsageDTO> transactionUsage = transactionRepo
                 .findByRequestDetails(request)
                 .stream()
@@ -111,23 +110,23 @@ public class request_detailsService {
                         .build())
                 .collect(Collectors.toList());
 
-        // Fetch SM20 audit logs
+
         List<SM20DTO> auditLogs = sm20Repo
                 .findByRequestDetails(request)
                 .stream()
                 .map(sm -> SM20DTO.builder()
-                        .timestamp(sm.getEvent()  )
-                        .action(sm.getEntrydate())
-                        .terminal(sm.getPeer())
-                        .object(sm.getProgram())
-                        .program(sm.getAuditLogMsgText())
-                        .details(sm.getNote())
+                        .timestamp(sm.getEntrydate() + " " + sm.getEntrytime())
+                        .action(sm.getClient())
+                        .terminal(sm.getTerminal())
+                        .object(sm.getSourceTA())
+                        .program(sm.getProgram())
+                        .details(sm.getAuditLogMsgText())
                         .build())
                 .collect(Collectors.toList());
 
 
 
-        // Fetch CDHDR-CDPOS change logs
+
         List<CdhdrCdposDTO> changeDocLogs = cdhdrCdposRepo
                 .findByRequestDetails(request)
                 .stream()
@@ -215,9 +214,7 @@ public class request_detailsService {
         return 0;
     }
 
-    /**
-     * Parse risk score from string
-     */
+
     private Integer parseRiskScore(String riskScore) {
         if (riskScore == null || riskScore.trim().isEmpty()) {
             return 0;
@@ -235,15 +232,13 @@ public class request_detailsService {
         return 0;
     }
 
-    /**
-     * Parse comma-separated string into list
-     */
+
     private List<String> parseCommaSeparatedList(String input) {
         if (input == null || input.trim().isEmpty()) {
             return List.of();
         }
-
-        return Arrays.stream(input.split(","))
+        String cleaned = input.replaceAll("[\\[\\]\"]", "");
+        return Arrays.stream(cleaned.split(","))
                 .map(String::trim)
                 .filter(s -> !s.isEmpty())
                 .collect(Collectors.toList());
@@ -256,10 +251,12 @@ public class request_detailsService {
         if (keyInsight == null || keyInsight.trim().isEmpty()) {
             return List.of();
         }
+        String cleaned = keyInsight.replaceAll("[\\[\\]\"]", "");
 
-        // Try splitting by newlines first, then commas
+
+
         if (keyInsight.contains("\n")) {
-            return Arrays.stream(keyInsight.split("\n"))
+            return Arrays.stream(cleaned.split("\n"))
                     .map(String::trim)
                     .filter(s -> !s.isEmpty())
                     .collect(Collectors.toList());
@@ -268,7 +265,7 @@ public class request_detailsService {
         }
     }
 
-    @Transactional  // ADD THIS
+    @Transactional
     public void uploadTransactionLog(MultipartFile file, request_details request) throws Exception {
         log.info("===== Uploading Transaction Log =====");
         log.info("Request ID: {}", request.getAnalysisID());
@@ -283,7 +280,7 @@ public class request_detailsService {
             Sheet sheet = workbook.getSheetAt(0);
             Iterator<Row> rowIterator = sheet.iterator();
 
-            // Skip header row
+
             if (rowIterator.hasNext()) {
                 Row headerRow = rowIterator.next();
                 log.info("Skipping header row");
@@ -310,7 +307,7 @@ public class request_detailsService {
         }
     }
 
-    @Transactional  // ADD THIS
+    @Transactional
     public void uploadSM20Log(MultipartFile file, request_details request) throws Exception {
         log.info("===== Uploading SM20 Log =====");
         log.info("Request ID: {}", request.getAnalysisID());
@@ -325,7 +322,6 @@ public class request_detailsService {
             Sheet sheet = workbook.getSheetAt(0);
             Iterator<Row> rowIterator = sheet.iterator();
 
-            // Skip header row
             if (rowIterator.hasNext()) {
                 Row headerRow = rowIterator.next();
                 log.info("Skipping header row");
@@ -338,8 +334,8 @@ public class request_detailsService {
                         .requestDetails(request)
                         .sapSystem(getCellValue(row, 0))
                         .asInstance(getCellValue(row, 1))
-                        .entrydate(getCellValue(row, 2))
-                        .entrytime(getCellValue(row, 3))
+                        .entrydate(getDateValue(row, 2))
+                        .entrytime(getTimeValue(row, 3))
                         .client(getCellValue(row, 4))
                         .event(getCellValue(row, 5))
                         .username(getCellValue(row, 6))
@@ -366,9 +362,53 @@ public class request_detailsService {
         }
     }
 
-    private String getCellValue(Row row, int colIndex) {
+
+private String getCellValue(Row row, int colIndex) {
+    Cell cell = row.getCell(colIndex);
+    if (cell == null) return "";
+
+    DataFormatter formatter = new DataFormatter();
+    return formatter.formatCellValue(cell).trim();
+}
+
+    private String getTimeValue(Row row, int colIndex) {
         Cell cell = row.getCell(colIndex);
         if (cell == null) return "";
+
+
+        if (cell.getCellType() == CellType.NUMERIC) {
+            if (DateUtil.isCellDateFormatted(cell)) {
+                Date date = cell.getDateCellValue();
+                SimpleDateFormat timeFormat = new SimpleDateFormat("HH:mm:ss");
+                return timeFormat.format(date);
+            } else {
+
+                double timeValue = cell.getNumericCellValue();
+
+                int totalSeconds = (int) (timeValue * 24 * 60 * 60);
+                int hours = totalSeconds / 3600;
+                int minutes = (totalSeconds % 3600) / 60;
+                int seconds = totalSeconds % 60;
+                return String.format("%02d:%02d:%02d", hours, minutes, seconds);
+            }
+        }
+
+
+        cell.setCellType(CellType.STRING);
+        return cell.getStringCellValue().trim();
+    }
+
+    private String getDateValue(Row row, int colIndex) {
+        Cell cell = row.getCell(colIndex);
+        if (cell == null) return "";
+
+        if (cell.getCellType() == CellType.NUMERIC && DateUtil.isCellDateFormatted(cell)) {
+            Date date = cell.getDateCellValue();
+            SimpleDateFormat dateFormat = new SimpleDateFormat("dd.MM.yyyy");
+            return dateFormat.format(date);
+        }
+
+
         cell.setCellType(CellType.STRING);
         return cell.getStringCellValue().trim();
     }
